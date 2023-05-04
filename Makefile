@@ -189,3 +189,19 @@ crossplane.help:
 help-special: crossplane.help
 
 .PHONY: crossplane.help help-special
+
+PYTHON_VENV_DIR = venv
+.PHONY: setup-venv
+# Setup virtual environment
+setup-venv:
+	$(Q)python3 -m venv $(PYTHON_VENV_DIR)
+	$(Q)$(PYTHON_VENV_DIR)/bin/pip install --upgrade setuptools
+	$(Q)$(PYTHON_VENV_DIR)/bin/pip install --upgrade pip
+
+.PHONY: test-acceptance-setup
+test-acceptance-setup: setup-venv
+	$(Q)$(PYTHON_VENV_DIR)/bin/pip install -q -r test/acceptance/features/requirements.txt
+
+.PHONY: test-acceptance
+test-acceptance: test-acceptance-setup
+	$(PYTHON_VENV_DIR)/bin/behave test/acceptance/features
