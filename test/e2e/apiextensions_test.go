@@ -17,6 +17,7 @@ limitations under the License.
 package e2e
 
 import (
+	"github.com/crossplane/crossplane-runtime/pkg/resource/unstructured/composite"
 	"testing"
 	"time"
 
@@ -191,6 +192,49 @@ func TestCompositionFunctions(t *testing.T) {
 				funcs.ResourcesDeletedWithin(2*time.Minute, manifests, "claim.yaml"),
 			)).
 			WithTeardown("DeletePrerequisites", funcs.ResourcesDeletedAfterListedAreGone(3*time.Minute, manifests, "setup/*.yaml", nopList)).
+			Feature(),
+	)
+}
+
+func TestRemoveLabelAndAnnotationOnClaimPropagateToXR(t *testing.T) {
+	manifests := "test/e2e/manifests/apiextensions/composition/removelabels"
+	environment.Test(t,
+		features.New(t.Name()).
+			WithLabel(LabelArea, LabelAreaAPIExtensions).
+			WithLabel(LabelSize, LabelSizeSmall).
+			WithLabel(config.LabelTestSuite, config.TestSuiteDefault).
+			WithSetup("PrerequisitesAreCreated", funcs.AllOf(
+				funcs.ApplyResources(FieldManager, manifests, "setup/*.yaml"),
+				funcs.ResourcesCreatedWithin(30*time.Second, manifests, "setup/*.yaml"),
+				funcs.ResourcesHaveConditionWithin(1*time.Minute, manifests, "setup/definition.yaml", apiextensionsv1.WatchingComposite()),
+			)).
+			Assess("CreateClaim", funcs.AllOf(
+				funcs.ApplyClaim(FieldManager, manifests, "claim.yaml"),
+				funcs.ResourcesCreatedWithin(30*time.Second, manifests, "claim.yaml"),
+				funcs.ResourcesHaveConditionWithin(5*time.Minute, manifests, "claim.yaml", xpv1.Available()),
+			)).
+			Assess("UpdateClaim", funcs.ApplyClaim(FieldManager, manifests, "claim-update.yaml")).
+			Assess("LabelsAndAnnotationRemovalPropagatedToXR", funcs.AllOf(
+				funcs.CompositeResourceMustMatchWithin(1*time.Minute, manifests, "claim.yaml", func(xr *composite.Unstructured) bool {
+					labels := xr.GetLabels()
+					fooLabel, fooLabelExists := labels["foo"]
+					_, barLabelExists := labels["bar"]
+					annotations := xr.GetAnnotations()
+					fooAnnotation, fooAnnotationExists := annotations["test/foo"]
+					_, barAnnotationExists := annotations["test/bar"]
+					return fooLabelExists && fooLabel == "1" && !barLabelExists &&
+						fooAnnotationExists && fooAnnotation == "1" && !barAnnotationExists
+				}),
+				funcs.ClaimUnderTestMustNotChangeWithin(1*time.Minute),
+			)).
+			WithTeardown("DeleteClaim", funcs.AllOf(
+				funcs.DeleteResources(manifests, "claim.yaml"),
+				funcs.ResourcesDeletedWithin(2*time.Minute, manifests, "claim.yaml"),
+			)).
+			WithTeardown("DeletePrerequisites", funcs.AllOf(
+				funcs.DeleteResources(manifests, "setup/*.yaml"),
+				funcs.ResourcesDeletedWithin(3*time.Minute, manifests, "setup/*.yaml"),
+			)).
 			Feature(),
 	)
 }
