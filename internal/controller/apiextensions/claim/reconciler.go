@@ -61,6 +61,7 @@ const (
 	errConfigureComposite = "cannot configure composite resource"
 	errBindComposite      = "cannot bind composite resource"
 	errApplyComposite     = "cannot apply composite resource"
+	errCreateComposite    = "cannot create composite resource"
 	errConfigureClaim     = "cannot configure composite resource claim"
 	errPropagateCDs       = "cannot propagate connection details from composite"
 
@@ -477,6 +478,22 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		if kerrors.IsConflict(err) {
 			return reconcile.Result{Requeue: true}, nil
 		}
+		if err.Error() == errBindCompositeConflict {
+			// the claim refers to a composite belonging to a different claim
+			// this case can occur if:
+			// 1. composite name gets generated
+			// 2. claim sets and persists the reference to composite with generated name
+			// 3. composite creation fails because the generated name is already taken
+			// 4. in the next reconcile loop we get the above conflict
+			// to unblock us, we need to remove composite reference at claim
+			// otherwise, we can move forward even if we requeue
+			cm.SetResourceReference(nil)
+			if err := r.client.Update(ctx, cm); err != nil {
+				return reconcile.Result{}, errors.Wrap(err, errUpdateClaim)
+			}
+			cm.SetConditions(xpv1.ReconcileError(err))
+			return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaim)
+		}
 		err = errors.Wrap(err, errConfigureComposite)
 		record.Event(cm, event.Warning(reasonCompositeConfigure, err))
 		cm.SetConditions(xpv1.ReconcileError(err))
@@ -505,8 +522,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
 	}
 
-	err := r.client.Apply(ctx, cp, resource.AllowUpdateIf(func(old, obj runtime.Object) bool { return !cmp.Equal(old, obj) }))
+	var err error
+	if meta.WasCreated(cp) {
+		err = r.client.Apply(ctx, cp, resource.AllowUpdateIf(func(old, obj runtime.Object) bool { return !cmp.Equal(old, obj) }))
+	} else {
+		// if composite did not exist at the beginning of the loop, we want to create it
+		// so that we can check if the composite name is not already taken
+		err = r.client.Create(ctx, cp)
+	}
 	switch {
+	case kerrors.IsAlreadyExists(err):
+		// generated name is already taken
+		// let's requeue and try again with the new name
+		log.Debug("Cannot create composite, another already exists with that name. Requeue and try another name")
+		err = errors.Wrap(err, errCreateComposite)
+		record.Event(cm, event.Warning(reasonCompositeConfigure, err))
+		cm.SetConditions(xpv1.ReconcileError(err))
+		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
 	case resource.IsNotAllowed(err):
 		log.Debug("Skipped no-op composite resource apply")
 	case err != nil:

@@ -131,7 +131,25 @@ func ConfigureComposite(_ context.Context, cm resource.CompositeClaim, cp resour
 	ucp.SetClaimReference(proposed)
 
 	if !meta.WasCreated(cp) {
-		cp.SetName(names.SimpleNameGenerator.GenerateName(fmt.Sprintf("%s-", cm.GetName())))
+		// composite was not found in the informer cache,
+		// or really does not exist.
+		// if the claim contains composite reference,
+		// try to use it to set the composite name.
+		// this protects us against stale informer cache
+		// 1. if composite exists, but the cache was not up-to-date,
+		//    then composite creation is going to fail, and after requeue,
+		//    the cache eventually gets up-to-date and everything is good
+		// 2. if the composite really does not exist, it means that
+		//    claim got bound in one of previous loop,
+		//    but an error occurred at composite creation and we requeued.
+		//    it is alright to try to use the very same again.
+		if ref := cm.GetResourceReference(); ref != nil &&
+			ref.APIVersion == ucp.GetAPIVersion() && ref.Kind == ucp.GetKind() {
+			cp.SetName(ref.Name)
+		} else {
+			// otherwise, generate name with a random suffix, hoping it is not already taken
+			cp.SetName(names.SimpleNameGenerator.GenerateName(fmt.Sprintf("%s-", cm.GetName())))
+		}
 	}
 
 	return nil
