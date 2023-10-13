@@ -768,7 +768,11 @@ func TestReconcile(t *testing.T) {
 					}),
 					WithBinder(NewAPIBinder(&test.MockClient{
 						MockUpdate: test.NewMockUpdateFn(nil, func(obj client.Object) error {
-							fmt.Println(obj)
+							ref := obj.(*claim.Unstructured).GetResourceReference()
+							if ref.Namespace != "" || !strings.HasPrefix(ref.Name, "c-") ||
+								ref.Kind != "Composite" || ref.APIVersion != "foo.com/v1" {
+								return fmt.Errorf("Claim has no valid composite ref %v", ref)
+							}
 							return nil
 						}),
 					})),
@@ -789,17 +793,6 @@ func TestReconcile(t *testing.T) {
 			},
 			want: want{
 				r: reconcile.Result{Requeue: true},
-				claimAssert: func(args args, want want) error {
-					ref := args.claim.GetResourceReference()
-					if ref.Namespace != "" || !strings.HasPrefix(ref.Name, "c-") ||
-						ref.Kind != "Composite" || ref.APIVersion != "foo.com/v1" {
-						return fmt.Errorf("Claim has no valid composite ref %v", ref)
-					}
-					if cd := args.claim.GetCondition(xpv1.TypeSynced); cd.Status != corev1.ConditionFalse {
-						return errors.New("reconcile error should be reported under conditions")
-					}
-					return nil
-				},
 			},
 		},
 		"CreateComposite": {
@@ -865,7 +858,6 @@ func TestReconcile(t *testing.T) {
 			want: want{
 				claimAssert: func(args args, want want) error {
 					ref := args.claim.GetResourceReference()
-					fmt.Println(ref)
 					if ref.Namespace != "" || !strings.HasPrefix(ref.Name, "c-") ||
 						ref.Kind != "Composite" || ref.APIVersion != "foo.com/v1" {
 						return fmt.Errorf("Claim has no valid composite ref %v", ref)
@@ -931,7 +923,6 @@ func TestReconcile(t *testing.T) {
 					o.SetName("c")
 					o.SetNamespace("ns")
 					o.SetResourceReference(nil)
-					o.SetConditions(xpv1.ReconcileError(errors.New(errBindCompositeConflict)))
 				}),
 			},
 		},
@@ -990,7 +981,6 @@ func TestReconcile(t *testing.T) {
 						APIVersion: "foo.com/v1",
 						Kind:       "Composite",
 					})
-					o.SetConditions(xpv1.ReconcileError(errors.Wrap(kerrors.NewAlreadyExists(schema.GroupResource{Group: "foo.com", Resource: "composite"}, "composite"), errCreateComposite)))
 				}),
 			},
 		},
@@ -1004,6 +994,7 @@ func TestReconcile(t *testing.T) {
 				tc.args.opts = append(tc.args.opts, func(r *Reconciler) {
 					var customGet test.MockGetFn
 					var customStatusUpdate test.MockSubResourceUpdateFn
+					var customUpdate test.MockUpdateFn
 					mockGet := func(ctx context.Context, key client.ObjectKey, obj client.Object) error {
 						if o, ok := obj.(*claim.Unstructured); ok {
 							tc.args.claim.DeepCopyInto(&o.Unstructured)
@@ -1025,15 +1016,28 @@ func TestReconcile(t *testing.T) {
 						return nil
 					}
 
+					mockUpdate := func(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+						if o, ok := obj.(*claim.Unstructured); ok {
+							o.DeepCopyInto(&tc.args.claim.Unstructured)
+						}
+						if customStatusUpdate != nil {
+							return customUpdate(ctx, obj, opts...)
+						}
+						return nil
+					}
+
 					if mockClient, ok := r.client.Client.(*test.MockClient); ok {
 						customGet = mockClient.MockGet
 						customStatusUpdate = mockClient.MockStatusUpdate
+						customUpdate = mockClient.MockUpdate
 						mockClient.MockGet = mockGet
 						mockClient.MockStatusUpdate = mockStatusUpdate
+						mockClient.MockUpdate = mockUpdate
 					} else {
 						r.client.Client = &test.MockClient{
 							MockGet:          mockGet,
 							MockStatusUpdate: mockStatusUpdate,
+							MockUpdate:       mockUpdate,
 						}
 					}
 				})

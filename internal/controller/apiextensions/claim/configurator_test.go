@@ -162,7 +162,7 @@ func TestCompositeConfigure(t *testing.T) {
 						},
 					},
 				},
-				err: errors.New(errBindCompositeConflict),
+				err: ErrBindCompositeConflict,
 			},
 		},
 		"ConfiguredNewXR": {
