@@ -19,13 +19,14 @@ package claim
 
 import (
 	"context"
+	"fmt"
+	v1 "k8s.io/client-go/applyconfigurations/meta/v1"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -87,22 +88,10 @@ func ControllerName(name string) string {
 	return "claim/" + name
 }
 
-// A Configurator configures the supplied resource, typically either populating the
-// composite with fields from the claim, or claim with fields from composite.
-// It returns ErrBindCompositeConflict if the composite is already bound to
-// a different claim and cannot be rebound.
-type Configurator interface {
-	Configure(ctx context.Context, cm resource.CompositeClaim, cp resource.Composite) error
-}
-
 // A ConfiguratorFn configures the supplied resource, typically either populating the
 // composite with fields from the claim, or claim with fields from composite.
-type ConfiguratorFn func(ctx context.Context, cm resource.CompositeClaim, cp resource.Composite) error
-
-// Configure the supplied resource using the supplied claim.
-func (fn ConfiguratorFn) Configure(ctx context.Context, cm resource.CompositeClaim, cp resource.Composite) error {
-	return fn(ctx, cm, cp)
-}
+type CompositeConfiguratorFn func(ctx context.Context, cm resource.CompositeClaim, cp, desiredCp resource.Composite) error
+type ClaimConfiguratorFn func(ctx context.Context, cm, desiredCm resource.CompositeClaim, cp resource.Composite) error
 
 // A Binder binds a composite resource claim to a composite resource.
 type Binder interface {
@@ -201,19 +190,22 @@ type Reconciler struct {
 	composite crComposite
 	claim     crClaim
 
-	log          logging.Logger
-	record       event.Recorder
-	pollInterval time.Duration
+	log                   logging.Logger
+	record                event.Recorder
+	pollInterval          time.Duration
+	fieldOwner            client.FieldOwner
+	patchOptions          []client.PatchOption
+	unstructuredExtractor v1.UnstructuredExtractor
 }
 
 type crComposite struct {
-	Configurator
+	Configure CompositeConfiguratorFn
 	ConnectionPropagator
 }
 
 func defaultCRComposite(c client.Client) crComposite {
 	return crComposite{
-		Configurator:         ConfiguratorFn(ConfigureComposite),
+		Configure:            ConfigureComposite,
 		ConnectionPropagator: NewAPIConnectionPropagator(c),
 	}
 }
@@ -221,7 +213,7 @@ func defaultCRComposite(c client.Client) crComposite {
 type crClaim struct {
 	resource.Finalizer
 	Binder
-	Configurator
+	Configure ClaimConfiguratorFn
 	ConnectionUnpublisher
 }
 
@@ -229,8 +221,8 @@ func defaultCRClaim(c client.Client) crClaim {
 	return crClaim{
 		Finalizer:             resource.NewAPIFinalizer(c, finalizer),
 		Binder:                NewAPIBinder(c),
-		Configurator:          NewAPIClaimConfigurator(c),
 		ConnectionUnpublisher: NewNopConnectionUnpublisher(),
+		Configure:             ConfigureClaim,
 	}
 }
 
@@ -247,17 +239,17 @@ func WithClientApplicator(ca resource.ClientApplicator) ReconcilerOption {
 
 // WithCompositeConfigurator specifies how the Reconciler should configure the bound
 // composite resource.
-func WithCompositeConfigurator(cf Configurator) ReconcilerOption {
+func WithCompositeConfigurator(cf CompositeConfiguratorFn) ReconcilerOption {
 	return func(r *Reconciler) {
-		r.composite.Configurator = cf
+		r.composite.Configure = cf
 	}
 }
 
 // WithClaimConfigurator specifies how the Reconciler should configure the bound
 // claim resource.
-func WithClaimConfigurator(cf Configurator) ReconcilerOption {
+func withClaimConfigurator(cf ClaimConfiguratorFn) ReconcilerOption {
 	return func(r *Reconciler) {
-		r.claim.Configurator = cf
+		r.claim.Configure = cf
 	}
 }
 
@@ -336,15 +328,24 @@ func NewReconciler(m manager.Manager, of resource.CompositeClaimKind, with resou
 		newComposite: func() resource.Composite {
 			return composite.New(composite.WithGroupVersionKind(schema.GroupVersionKind(with)))
 		},
-		composite: defaultCRComposite(c),
-		claim:     defaultCRClaim(c),
-		log:       logging.NewNopLogger(),
-		record:    event.NewNopRecorder(),
+		composite:  defaultCRComposite(c),
+		claim:      defaultCRClaim(c),
+		log:        logging.NewNopLogger(),
+		record:     event.NewNopRecorder(),
+		fieldOwner: client.FieldOwner(fmt.Sprintf("%s-controller", schema.GroupVersionKind(with).GroupKind().String())),
 	}
+
+	//if dc, err := discovery.NewDiscoveryClientForConfig(m.GetConfig()); err == nil {
+	//	if ue, err := v1.NewUnstructuredExtractor(dc); err == nil {
+	//		r.unstructuredExtractor = ue
+	//	}
+	//}
 
 	for _, ro := range o {
 		ro(r)
 	}
+
+	r.patchOptions = []client.PatchOption{client.ForceOwnership, r.fieldOwner}
 
 	return r
 }
@@ -466,17 +467,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return reconcile.Result{Requeue: false}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
 	}
 
-	if err := r.claim.AddFinalizer(ctx, cm); err != nil {
-		if kerrors.IsConflict(err) {
-			return reconcile.Result{Requeue: true}, nil
-		}
-		err = errors.Wrap(err, errAddFinalizer)
-		record.Event(cm, event.Warning(reasonBind, err))
-		cm.SetConditions(xpv1.ReconcileError(err))
-		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
-	}
+	desiredCm := r.newClaim()
 
-	if err := r.composite.Configure(ctx, cm, cp); err != nil {
+	meta.AddFinalizer(desiredCm, finalizer)
+
+	//if err := r.claim.AddFinalizer(ctx, cm); err != nil {
+	//	log.Debug(errAddFinalizer, "error", err)
+	//	if kerrors.IsConflict(err) {
+	//		return reconcile.Result{Requeue: true}, nil
+	//	}
+	//	err = errors.Wrap(err, errAddFinalizer)
+	//	record.Event(cm, event.Warning(reasonBind, err))
+	//	cm.SetConditions(xpv1.ReconcileError(err))
+	//	return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
+	//}
+
+	desiredCp := r.newComposite()
+	if err := r.composite.Configure(ctx, cm, cp, desiredCp); err != nil {
+		log.Debug(errConfigureComposite, "error", err)
 		if kerrors.IsConflict(err) {
 			return reconcile.Result{Requeue: true}, nil
 		}
@@ -489,8 +497,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 			// 4. in the next reconcile loop we get the above conflict
 			// to unblock us, we need to remove the composite reference at the claim
 			// otherwise, we can move forward even if we requeue
-			cm.SetResourceReference(nil)
-			_ = r.client.Update(ctx, cm)
+			//patchCm.SetResourceReference(nil)
+			_ = r.client.Patch(ctx, cm, client.Apply, r.patchOptions...)
 			return reconcile.Result{Requeue: true}, nil
 		}
 		err = errors.Wrap(err, errConfigureComposite)
@@ -511,7 +519,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	// resourceRef we'd risk leaking composite resources, e.g. if we hit an
 	// error between when we created the composite resource and when we
 	// persisted its resourceRef.
-	if err := r.claim.Bind(ctx, cm, cp); err != nil {
+	if err := r.claim.Bind(ctx, desiredCm, desiredCp); err != nil {
+		log.Debug(errBindComposite, "error", err)
 		if kerrors.IsConflict(err) {
 			return reconcile.Result{Requeue: true}, nil
 		}
@@ -521,13 +530,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
 	}
 
-	var err error
+	patchCm := desiredCm.DeepCopyObject().(*claim.Unstructured)
+	err := r.client.Patch(ctx, desiredCm, client.Apply, r.patchOptions...)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	log.Debug("ZZZ", "v", desiredCm.(*claim.Unstructured).Object)
 	if meta.WasCreated(cp) {
-		err = r.client.Apply(ctx, cp, resource.AllowUpdateIf(func(old, obj runtime.Object) bool { return !cmp.Equal(old, obj) }))
+		err = r.client.Patch(ctx, desiredCp, client.Apply, r.patchOptions...)
 	} else {
 		// if composite did not exist at the beginning of the loop, we want to create it
 		// so that we can check if the composite name is not already taken
-		err = r.client.Create(ctx, cp)
+		err = r.client.Create(ctx, desiredCp, r.fieldOwner)
 	}
 	switch {
 	case kerrors.IsAlreadyExists(err):
@@ -547,47 +561,54 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
 	default:
 		record.Event(cm, event.Normal(reasonCompositeConfigure, "Successfully applied composite resource"))
+		log.Debug("XXX", "v", desiredCp.(*composite.Unstructured).Object)
 	}
 
-	if err := r.claim.Configure(ctx, cm, cp); err != nil {
+	if err := r.claim.Configure(ctx, desiredCm, patchCm, desiredCp); err != nil {
+		log.Debug(errConfigureClaim, "error", err)
 		if kerrors.IsConflict(err) {
 			return reconcile.Result{Requeue: true}, nil
 		}
 		err = errors.Wrap(err, errConfigureClaim)
 		record.Event(cm, event.Warning(reasonClaimConfigure, err))
-		cm.SetConditions(xpv1.ReconcileError(err))
-		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
+		desiredCm.SetConditions(xpv1.ReconcileError(err))
+		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, desiredCm), errUpdateClaimStatus)
 	}
+	if err := r.client.Patch(ctx, patchCm, client.Apply, r.patchOptions...); err != nil {
+		log.Debug("error patching claim", "error", err)
+		return reconcile.Result{}, err
+	}
+	patchCm.SetConditions(xpv1.ReconcileSuccess())
 
-	cm.SetConditions(xpv1.ReconcileSuccess())
-
-	if !resource.IsConditionTrue(cp.GetCondition(xpv1.TypeReady)) {
+	if !resource.IsConditionTrue(desiredCp.GetCondition(xpv1.TypeReady)) {
+		log.Debug("Composite resource is not yet ready")
 		record.Event(cm, event.Normal(reasonBind, "Composite resource is not yet ready"))
 
 		// We should be watching the composite resource and will have a
 		// request queued if it changes, so no need to requeue.
-		cm.SetConditions(Waiting())
-		return reconcile.Result{}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
+		patchCm.SetConditions(Waiting())
+		return reconcile.Result{}, errors.Wrap(r.client.Status().Update(ctx, patchCm), errUpdateClaimStatus)
 	}
 
-	record.Event(cm, event.Normal(reasonBind, "Successfully bound composite resource"))
+	log.Debug("Successfully bound composite resource")
+	record.Event(patchCm, event.Normal(reasonBind, "Successfully bound composite resource"))
 
-	propagated, err := r.composite.PropagateConnection(ctx, cm, cp)
+	propagated, err := r.composite.PropagateConnection(ctx, patchCm, desiredCp)
 	if err != nil {
 		err = errors.Wrap(err, errPropagateCDs)
 		record.Event(cm, event.Warning(reasonPropagate, err))
-		cm.SetConditions(xpv1.ReconcileError(err))
-		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
+		patchCm.SetConditions(xpv1.ReconcileError(err))
+		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, patchCm), errUpdateClaimStatus)
 	}
 	if propagated {
-		cm.SetConnectionDetailsLastPublishedTime(&metav1.Time{Time: time.Now()})
-		record.Event(cm, event.Normal(reasonPropagate, "Successfully propagated connection details from composite resource"))
+		patchCm.SetConnectionDetailsLastPublishedTime(&metav1.Time{Time: time.Now()})
+		record.Event(patchCm, event.Normal(reasonPropagate, "Successfully propagated connection details from composite resource"))
 	}
 
 	// We have a watch on both the claim and its composite, so there's no
 	// need to requeue here.
-	cm.SetConditions(xpv1.Available())
-	return reconcile.Result{Requeue: false}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
+	patchCm.SetConditions(xpv1.Available())
+	return reconcile.Result{Requeue: false}, errors.Wrap(r.client.Status().Update(ctx, patchCm), errUpdateClaimStatus)
 }
 
 // Waiting returns a condition that indicates the composite resource claim is

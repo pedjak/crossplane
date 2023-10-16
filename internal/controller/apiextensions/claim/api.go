@@ -72,7 +72,7 @@ func (a *APIBinder) Bind(ctx context.Context, cm resource.CompositeClaim, cp res
 	}
 
 	cm.SetResourceReference(proposed)
-	return errors.Wrap(a.client.Update(ctx, cm), errUpdateClaim)
+	return nil
 }
 
 // An APIConnectionPropagator propagates connection details by reading

@@ -689,7 +689,7 @@ func TestCompositeConfigure(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			got := ConfigureComposite(tc.args.ctx, tc.args.cm, tc.args.cp)
+			got := ConfigureComposite(tc.args.ctx, tc.args.cm, tc.args.cp, nil)
 			if diff := cmp.Diff(tc.want.err, got, test.EquateErrors()); diff != "" {
 				t.Errorf("Configure(...): %s\n-want error, +got error:\n%s\n", tc.reason, diff)
 			}
@@ -1217,7 +1217,7 @@ func TestClaimConfigure(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			c := NewAPIClaimConfigurator(tc.args.client)
-			got := c.Configure(context.Background(), tc.args.cm, tc.args.cp)
+			got := c.Configure(context.Background(), tc.args.cm, nil, tc.args.cp)
 			if diff := cmp.Diff(tc.want.err, got, test.EquateErrors()); diff != "" {
 				t.Errorf("c.Configure(...): %s\n-want error, +got error:\n%s\n", tc.reason, diff)
 			}
