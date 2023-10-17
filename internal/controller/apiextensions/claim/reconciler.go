@@ -20,6 +20,7 @@ package claim
 import (
 	"context"
 	"fmt"
+	"golang.org/x/exp/maps"
 	v1 "k8s.io/client-go/applyconfigurations/meta/v1"
 	"time"
 
@@ -468,6 +469,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	}
 
 	desiredCm := r.newClaim()
+	desiredCm.SetName(cm.GetName())
+	desiredCm.SetNamespace(cm.GetNamespace())
 
 	meta.AddFinalizer(desiredCm, finalizer)
 
@@ -530,9 +533,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
 	}
 
-	patchCm := desiredCm.DeepCopyObject().(*claim.Unstructured)
+	patchCm := claim.New(func(u *claim.Unstructured) {
+		u.Object = maps.Clone(desiredCm.(*claim.Unstructured).Object)
+	})
 	err := r.client.Patch(ctx, desiredCm, client.Apply, r.patchOptions...)
 	if err != nil {
+		log.Debug("ERR", "err", err)
 		return reconcile.Result{}, err
 	}
 	log.Debug("ZZZ", "v", desiredCm.(*claim.Unstructured).Object)
@@ -578,6 +584,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		log.Debug("error patching claim", "error", err)
 		return reconcile.Result{}, err
 	}
+	log.Debug("ZZZ2", "v", patchCm.Object)
 	patchCm.SetConditions(xpv1.ReconcileSuccess())
 
 	if !resource.IsConditionTrue(desiredCp.GetCondition(xpv1.TypeReady)) {

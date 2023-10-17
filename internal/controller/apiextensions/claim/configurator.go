@@ -156,11 +156,13 @@ func ConfigureComposite(_ context.Context, cm resource.CompositeClaim, cp, desir
 	//    It is alright to try to use the very same name again.
 	if ref := cm.GetResourceReference(); ref != nil &&
 		ref.APIVersion == ucp.GetAPIVersion() && ref.Kind == ucp.GetKind() {
+		fmt.Println("xxxx " + ref.Name)
 		desiredCp.SetName(ref.Name)
 		return nil
 	}
 	// Otherwise, generate name with a random suffix, hoping it is not already taken
 	desiredCp.SetName(names.SimpleNameGenerator.GenerateName(fmt.Sprintf("%s-", cm.GetName())))
+	fmt.Println("zzz " + desiredCp.GetName())
 
 	return nil
 }
