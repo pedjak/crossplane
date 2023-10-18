@@ -479,7 +479,7 @@ func TestReconcile(t *testing.T) {
 			want: want{
 				claim: withClaim(func(o *claim.Unstructured) {
 					o.SetResourceReference(&corev1.ObjectReference{})
-					o.SetConditions(xpv1.ReconcileError(errors.Wrap(errBoom, errApplyComposite)))
+					o.SetConditions(xpv1.ReconcileError(errors.Wrap(errBoom, errPatchComposite)))
 				}),
 				r: reconcile.Result{Requeue: true},
 			},
