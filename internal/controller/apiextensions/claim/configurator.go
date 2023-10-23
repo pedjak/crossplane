@@ -22,14 +22,17 @@ import (
 	"strings"
 
 	"dario.cat/mergo"
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apiserver/pkg/storage/names"
+
 	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
 	"github.com/crossplane/crossplane-runtime/pkg/errors"
 	"github.com/crossplane/crossplane-runtime/pkg/meta"
 	"github.com/crossplane/crossplane-runtime/pkg/resource"
 	"github.com/crossplane/crossplane-runtime/pkg/resource/unstructured/claim"
 	"github.com/crossplane/crossplane-runtime/pkg/resource/unstructured/composite"
-	"github.com/google/go-cmp/cmp"
-	"k8s.io/apiserver/pkg/storage/names"
 
 	"github.com/crossplane/crossplane/internal/xcrd"
 )
@@ -48,19 +51,12 @@ var (
 	ErrBindCompositeConflict = errors.New("cannot bind composite resource that references a different claim")
 )
 
-func nonK8sAnnotations(a map[string]string) map[string]string {
-	maps.DeleteFunc(a, func(k string, v string) bool {
-		return k == "kubectl.kubernetes.io/last-applied-configuration"
-	})
-	return a
-}
-
 // ConfigureComposite configures the supplied composite resource
 // by propagating configuration from the supplied claim.
 // Both create and update scenarios are supported; i.e. the
 // composite may or may not have been created in the API server
 // when passed to this method.
-func ConfigureComposite(_ context.Context, cm resource.CompositeClaim, cp, desiredCp resource.Composite) error { //nolint:gocyclo // Only slightly over (12).
+func configureComposite(_ context.Context, cm resource.CompositeClaim, cp, desiredCp resource.Composite) error { //nolint:gocyclo // Only slightly over (12).
 	ucm, ok := cm.(*claim.Unstructured)
 	if !ok {
 		return nil
@@ -156,7 +152,6 @@ func ConfigureComposite(_ context.Context, cm resource.CompositeClaim, cp, desir
 	//    It is alright to try to use the very same name again.
 	if ref := cm.GetResourceReference(); ref != nil &&
 		ref.APIVersion == ucp.GetAPIVersion() && ref.Kind == ucp.GetKind() {
-		fmt.Println("xxxx " + ref.Name)
 		desiredCp.SetName(ref.Name)
 		return nil
 	}
@@ -194,9 +189,40 @@ func filter(in map[string]any, keys ...string) map[string]any {
 	return out
 }
 
+func keep(in map[string]any, keys ...string) map[string]any {
+	filter := map[string]bool{}
+	for _, k := range keys {
+		filter[k] = true
+	}
+
+	out := map[string]any{}
+	for k, v := range in {
+		if filter[k] {
+			out[k] = v
+		}
+	}
+	return out
+}
+
 // Configure the supplied claims with fields from the composite.
 // This includes late-initializing spec values and updating status fields in claim.
-func ConfigureClaim(_ context.Context, cm resource.CompositeClaim, desiredCm resource.CompositeClaim, cp resource.Composite) error {
+func configureClaim(_ context.Context, cm resource.CompositeClaim, desiredCm resource.CompositeClaim, cp resource.Composite) error { //nolint:gocyclo // Only slightly over (10)
+	existing := cm.GetResourceReference()
+	proposed := meta.ReferenceTo(cp, cp.GetObjectKind().GroupVersionKind())
+	equal := cmp.Equal(existing, proposed, cmpopts.IgnoreFields(corev1.ObjectReference{}, "UID"))
+
+	// We refuse to 're-bind' a claim that is already bound to a different
+	// composite resource.
+	if existing != nil && !equal {
+		return errors.New(errBindClaimConflict)
+	}
+
+	// There's no need to call update if the claim already references this
+	// composite resource.
+	if !equal {
+		desiredCm.SetResourceReference(proposed)
+	}
+
 	ucm, ok := cm.(*claim.Unstructured)
 	if !ok {
 		return nil
@@ -217,8 +243,7 @@ func ConfigureClaim(_ context.Context, cm resource.CompositeClaim, desiredCm res
 		withSrcFilter(xcrd.GetPropFields(xcrd.CompositeResourceStatusProps())...)); err != nil {
 		return errors.Wrap(err, errMergeClaimStatus)
 	}
-
-	//if err := c.client.Status().Update(ctx, cm); err != nil {
+	// if err := c.client.Status().Update(ctx, cm); err != nil {
 	//	return errors.Wrap(err, errUpdateClaimStatus)
 	//}
 
@@ -239,8 +264,8 @@ func ConfigureClaim(_ context.Context, cm resource.CompositeClaim, desiredCm res
 	// 2. Deleting any well-known fields that we want to propagate.
 	// 3. Filtering OUT the remaining map keys from the composite's spec so
 	// that we end up adding only the well-known fields to the claim's spec.
-	//wellKnownCompositeFields := xcrd.CompositeResourceSpecProps()
-	//for _, field := range xcrd.PropagateSpecProps {
+	// wellKnownCompositeFields := xcrd.CompositeResourceSpecProps()
+	// for _, field := range xcrd.PropagateSpecProps {
 	//	delete(wellKnownCompositeFields, field)
 	//}
 
@@ -248,16 +273,19 @@ func ConfigureClaim(_ context.Context, cm resource.CompositeClaim, desiredCm res
 	// based on the Update policy. If the policy is `Automatic`, we need to
 	// overwrite the claim's value with the composite's which should be the
 	// `currentRevision`
-	if cp.GetCompositionUpdatePolicy() != nil && *cp.GetCompositionUpdatePolicy() == xpv1.UpdateAutomatic {
+	if cp.GetCompositionUpdatePolicy() != nil &&
+		*cp.GetCompositionUpdatePolicy() == xpv1.UpdateAutomatic && cp.GetCompositionRevisionReference() != nil {
 		desiredCm.SetCompositionRevisionReference(cp.GetCompositionRevisionReference())
 	}
 
-	//compositeSpecFilter := xcrd.GetPropFields(wellKnownCompositeFields)
-	//if err := merge(ucm.Object["spec"], ucp.Object["spec"],
-	//	withSrcFilter(compositeSpecFilter...)); err != nil {
-	//	return errors.Wrap(err, errMergeClaimSpec)
-	//}
-	//return errors.Wrap(c.client.Update(ctx, cm), errUpdateClaim)
+	// compositeSpecFilter := xcrd.GetPropFields(wellKnownCompositeFields)
+	// fmt.Printf("%v", compositeSpecFilter)
+	if err := merge(udesiredCm.Object["spec"], ucp.Object["spec"],
+		keepSrcKeys(),
+		withSrcFilter(xcrd.PropagateSpecProps...)); err != nil {
+		return errors.Wrap(err, errMergeClaimSpec)
+	}
+	// return errors.Wrap(c.client.Update(ctx, cm), errUpdateClaim)
 
 	return nil
 }
@@ -265,12 +293,19 @@ func ConfigureClaim(_ context.Context, cm resource.CompositeClaim, desiredCm res
 type mergeConfig struct {
 	mergeOptions []func(*mergo.Config)
 	srcfilter    []string
+	keep         bool
 }
 
 // withMergeOptions allows custom mergo.Config options
 func withMergeOptions(opts ...func(*mergo.Config)) func(*mergeConfig) {
 	return func(config *mergeConfig) {
 		config.mergeOptions = opts
+	}
+}
+
+func keepSrcKeys() func(*mergeConfig) {
+	return func(config *mergeConfig) {
+		config.keep = true
 	}
 }
 
@@ -306,5 +341,9 @@ func merge(dst, src any, opts ...func(*mergeConfig)) error {
 		return errors.New(errUnsupportedSrcObject)
 	}
 
+	if config.keep {
+		return mergo.Merge(&dstMap, keep(srcMap, config.srcfilter...), config.mergeOptions...)
+	}
 	return mergo.Merge(&dstMap, filter(srcMap, config.srcfilter...), config.mergeOptions...)
+
 }

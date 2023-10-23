@@ -88,8 +88,8 @@ func ControllerName(name string) string {
 
 // A ConfiguratorFn configures the supplied resource, typically either populating the
 // composite with fields from the claim, or claim with fields from composite.
-type CompositeConfiguratorFn func(ctx context.Context, cm resource.CompositeClaim, cp, desiredCp resource.Composite) error
-type ClaimConfiguratorFn func(ctx context.Context, cm, desiredCm resource.CompositeClaim, cp resource.Composite) error
+type compositeConfiguratorFn func(ctx context.Context, cm resource.CompositeClaim, cp, desiredCp resource.Composite) error
+type claimConfiguratorFn func(ctx context.Context, cm, desiredCm resource.CompositeClaim, cp resource.Composite) error
 
 // A Binder binds a composite resource claim to a composite resource.
 type Binder interface {
@@ -196,30 +196,28 @@ type Reconciler struct {
 }
 
 type crComposite struct {
-	Configure CompositeConfiguratorFn
+	Configure compositeConfiguratorFn
 	ConnectionPropagator
 }
 
 func defaultCRComposite(c client.Client) crComposite {
 	return crComposite{
-		Configure:            ConfigureComposite,
+		Configure:            configureComposite,
 		ConnectionPropagator: NewAPIConnectionPropagator(c),
 	}
 }
 
 type crClaim struct {
 	resource.Finalizer
-	Binder
-	Configure ClaimConfiguratorFn
+	Configure claimConfiguratorFn
 	ConnectionUnpublisher
 }
 
 func defaultCRClaim(c client.Client) crClaim {
 	return crClaim{
 		Finalizer:             resource.NewAPIFinalizer(c, finalizer),
-		Binder:                NewAPIBinder(c),
 		ConnectionUnpublisher: NewNopConnectionUnpublisher(),
-		Configure:             ConfigureClaim,
+		Configure:             configureClaim,
 	}
 }
 
@@ -234,9 +232,9 @@ func WithClientApplicator(ca resource.ClientApplicator) ReconcilerOption {
 	}
 }
 
-// WithCompositeConfigurator specifies how the Reconciler should configure the bound
+// withCompositeConfigurator specifies how the Reconciler should configure the bound
 // composite resource.
-func WithCompositeConfigurator(cf CompositeConfiguratorFn) ReconcilerOption {
+func withCompositeConfigurator(cf compositeConfiguratorFn) ReconcilerOption {
 	return func(r *Reconciler) {
 		r.composite.Configure = cf
 	}
@@ -244,7 +242,7 @@ func WithCompositeConfigurator(cf CompositeConfiguratorFn) ReconcilerOption {
 
 // WithClaimConfigurator specifies how the Reconciler should configure the bound
 // claim resource.
-func withClaimConfigurator(cf ClaimConfiguratorFn) ReconcilerOption {
+func withClaimConfigurator(cf claimConfiguratorFn) ReconcilerOption {
 	return func(r *Reconciler) {
 		r.claim.Configure = cf
 	}
@@ -263,14 +261,6 @@ func WithConnectionPropagator(p ConnectionPropagator) ReconcilerOption {
 func WithConnectionUnpublisher(u ConnectionUnpublisher) ReconcilerOption {
 	return func(r *Reconciler) {
 		r.claim.ConnectionUnpublisher = u
-	}
-}
-
-// WithBinder specifies which Binder should be used to bind
-// resources to their claim.
-func WithBinder(b Binder) ReconcilerOption {
-	return func(r *Reconciler) {
-		r.claim.Binder = b
 	}
 }
 
@@ -473,7 +463,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 
 	meta.AddFinalizer(desiredCm, finalizer)
 
-	//if err := r.claim.AddFinalizer(ctx, cm); err != nil {
+	// if err := r.claim.AddFinalizer(ctx, cm); err != nil {
 	//	log.Debug(errAddFinalizer, "error", err)
 	//	if kerrors.IsConflict(err) {
 	//		return reconcile.Result{Requeue: true}, nil
@@ -499,7 +489,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 			// 4. in the next reconcile loop we get the above conflict
 			// to unblock us, we need to remove the composite reference at the claim
 			// otherwise, we can move forward even if we requeue
-			//patchCm.SetResourceReference(nil)
+			// patchCm.SetResourceReference(nil)
 			_ = r.client.Patch(ctx, desiredCm, client.Apply, r.patchOptions...)
 			return reconcile.Result{Requeue: true}, nil
 		}
@@ -521,15 +511,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	// resourceRef we'd risk leaking composite resources, e.g. if we hit an
 	// error between when we created the composite resource and when we
 	// persisted its resourceRef.
-	if err := r.claim.Bind(ctx, desiredCm, desiredCp); err != nil {
-		log.Debug(errBindComposite, "error", err)
-		if kerrors.IsConflict(err) {
-			return reconcile.Result{Requeue: true}, nil
-		}
-		err = errors.Wrap(err, errBindComposite)
-		record.Event(cm, event.Warning(reasonBind, err))
-		cm.SetConditions(xpv1.ReconcileError(err))
-		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm, r.fieldOwner), errUpdateClaimStatus)
+	// if err := r.claim.Bind(ctx, desiredCm, desiredCp); err != nil {
+	//	log.Debug(errBindComposite, "error", err)
+	//	if kerrors.IsConflict(err) {
+	//		return reconcile.Result{Requeue: true}, nil
+	//	}
+	//	err = errors.Wrap(err, errBindComposite)
+	//	record.Event(cm, event.Warning(reasonBind, err))
+	//	cm.SetConditions(xpv1.ReconcileError(err))
+	//	return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm, r.fieldOwner), errUpdateClaimStatus)
+	//}
+	if !meta.WasCreated(cp) {
+		cp.SetName(desiredCp.GetName())
 	}
 	if err := r.claim.Configure(ctx, cm, desiredCm, cp); err != nil {
 		log.Debug(errConfigureClaim, "error", err)
@@ -539,7 +532,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		err = errors.Wrap(err, errConfigureClaim)
 		record.Event(cm, event.Warning(reasonClaimConfigure, err))
 		cm.SetConditions(xpv1.ReconcileError(err))
-		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, desiredCm, r.fieldOwner), errUpdateClaimStatus)
+		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm, r.fieldOwner), errUpdateClaimStatus)
 	}
 	log.Debug("PATCH CLAIM", "v", desiredCm.(*claim.Unstructured).Object)
 	err := r.client.Patch(ctx, desiredCm, client.Apply, r.patchOptions...)
@@ -575,7 +568,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	default:
 		record.Event(cm, event.Normal(reasonCompositeConfigure, "Successfully applied composite resource"))
 		log.Debug("XXX", "v", desiredCp.(*composite.Unstructured).Object)
-		//if desiredCp.GetGeneration() == 1 {
+		// if desiredCp.GetGeneration() == 1 {
 		//	mfs := desiredCp.GetManagedFields()
 		//	for i, _ := range mfs {
 		//		if mfs[i].Manager == string(r.fieldOwner) && mfs[i].Operation == "Update" {
@@ -629,7 +622,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 func (r *Reconciler) maybeFixFieldOwnership(obj metav1.Object) bool {
 	// https://github.com/kubernetes/kubernetes/issues/99003
 	mfs := obj.GetManagedFields()
-	for i, _ := range mfs {
+	for i := range mfs {
 		if mfs[i].Manager == string(r.fieldOwner) && mfs[i].Operation == "Update" {
 			mfs[i].Operation = "Apply"
 			obj.SetManagedFields(mfs)

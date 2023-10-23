@@ -17,7 +17,6 @@ limitations under the License.
 package e2e
 
 import (
-	"github.com/crossplane/crossplane-runtime/pkg/resource/unstructured/composite"
 	"testing"
 	"time"
 
@@ -26,6 +25,7 @@ import (
 
 	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
 	"github.com/crossplane/crossplane-runtime/pkg/resource/unstructured/composed"
+	"github.com/crossplane/crossplane-runtime/pkg/resource/unstructured/composite"
 
 	apiextensionsv1 "github.com/crossplane/crossplane/apis/apiextensions/v1"
 	pkgv1 "github.com/crossplane/crossplane/apis/pkg/v1"

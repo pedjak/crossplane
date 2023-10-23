@@ -66,6 +66,7 @@ import (
 
 // DefaultPollInterval is the suggested poll interval for wait.For.
 const DefaultPollInterval = time.Millisecond * 500
+
 type onSuccessHandler func(o k8s.Object)
 
 // AllOf runs the supplied functions in order.
@@ -411,6 +412,8 @@ func ApplyResources(manager, dir, pattern string, options ...decoder.DecodeOptio
 
 type claimCtxKey struct{}
 
+// ApplyClaim applies the claim stored in the given folder and file
+// and stores it in the test context for later retrival if needed
 func ApplyClaim(manager, dir, cm string) features.Func {
 	return func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
 		dfs := os.DirFS(dir)
@@ -491,10 +494,8 @@ func ApplyHandler(r *resources.Resources, manager string, osh ...onSuccessHandle
 		if err := r.GetControllerRuntimeClient().Patch(ctx, obj, client.Apply, client.FieldOwner(manager), client.ForceOwnership); err != nil {
 			return err
 		}
-		if osh != nil {
-			for _, h := range osh {
-				h(obj)
-			}
+		for _, h := range osh {
+			h(obj)
 		}
 		return nil
 	}
@@ -553,6 +554,8 @@ func CopyImageToRegistry(clusterName, ns, sName, image string, timeout time.Dura
 	}
 }
 
+// ClaimUnderTestMustNotChangeWithin asserts that the claim available in
+// the test context does not change within the given time
 func ClaimUnderTestMustNotChangeWithin(d time.Duration) features.Func {
 	return func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
 		cm, ok := ctx.Value(claimCtxKey{}).(*claim.Unstructured)
@@ -583,6 +586,8 @@ func ClaimUnderTestMustNotChangeWithin(d time.Duration) features.Func {
 	}
 }
 
+// CompositeResourceMustMatchWithin assert that a composite referred by the given file
+// must be matched by the given function within the given timeout
 func CompositeResourceMustMatchWithin(d time.Duration, dir, claimFile string, match func(xr *composite.Unstructured) bool) features.Func {
 	return func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
 		cm := &claim.Unstructured{}
