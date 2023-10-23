@@ -157,7 +157,6 @@ func configureComposite(_ context.Context, cm resource.CompositeClaim, cp, desir
 	}
 	// Otherwise, generate name with a random suffix, hoping it is not already taken
 	desiredCp.SetName(names.SimpleNameGenerator.GenerateName(fmt.Sprintf("%s-", cm.GetName())))
-	fmt.Println("zzz " + desiredCp.GetName())
 
 	return nil
 }
@@ -206,9 +205,9 @@ func keep(in map[string]any, keys ...string) map[string]any {
 
 // Configure the supplied claims with fields from the composite.
 // This includes late-initializing spec values and updating status fields in claim.
-func configureClaim(_ context.Context, cm resource.CompositeClaim, desiredCm resource.CompositeClaim, cp resource.Composite) error { //nolint:gocyclo // Only slightly over (10)
+func configureClaim(_ context.Context, cm resource.CompositeClaim, desiredCm resource.CompositeClaim, cp resource.Composite, desiredCp resource.Composite) error { //nolint:gocyclo // Only slightly over (10)
 	existing := cm.GetResourceReference()
-	proposed := meta.ReferenceTo(cp, cp.GetObjectKind().GroupVersionKind())
+	proposed := meta.ReferenceTo(desiredCp, desiredCp.GetObjectKind().GroupVersionKind())
 	equal := cmp.Equal(existing, proposed, cmpopts.IgnoreFields(corev1.ObjectReference{}, "UID"))
 
 	// We refuse to 're-bind' a claim that is already bound to a different
@@ -217,11 +216,7 @@ func configureClaim(_ context.Context, cm resource.CompositeClaim, desiredCm res
 		return errors.New(errBindClaimConflict)
 	}
 
-	// There's no need to call update if the claim already references this
-	// composite resource.
-	if !equal {
-		desiredCm.SetResourceReference(proposed)
-	}
+	desiredCm.SetResourceReference(proposed)
 
 	ucm, ok := cm.(*claim.Unstructured)
 	if !ok {
@@ -236,7 +231,13 @@ func configureClaim(_ context.Context, cm resource.CompositeClaim, desiredCm res
 	if !ok {
 		return nil
 	}
-	udesiredCm.Object["status"] = ucm.Object["status"]
+	if s, ok := ucm.Object["status"]; ok {
+		fs, ok := s.(map[string]any)
+		if !ok {
+			return errors.Wrap(errors.New(errUnsupportedSrcObject), errMergeClaimStatus)
+		}
+		udesiredCm.Object["status"] = filter(fs)
+	}
 	if err := merge(udesiredCm.Object["status"], ucp.Object["status"],
 		// Status fields from composite overwrite non-empty fields in claim
 		withMergeOptions(mergo.WithOverride),

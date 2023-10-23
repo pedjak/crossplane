@@ -739,7 +739,7 @@ func TestClaimConfigure(t *testing.T) {
 						},
 					},
 				},
-				err: errors.Wrap(errors.New(errUnsupportedDstObject), errMergeClaimStatus),
+				err: errors.Wrap(errors.New(errUnsupportedSrcObject), errMergeClaimStatus),
 			},
 		},
 		"MergeStatusCompositeError": {
@@ -1127,7 +1127,7 @@ func TestClaimConfigure(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			patchCm := claim.New()
-			got := configureClaim(context.Background(), tc.args.cm, patchCm, tc.args.cp)
+			got := configureClaim(context.Background(), tc.args.cm, patchCm, tc.args.cp, tc.args.cp)
 			if diff := cmp.Diff(tc.want.err, got, test.EquateErrors()); diff != "" {
 				t.Errorf("c.Configure(...): %s\n-want error, +got error:\n%s\n", tc.reason, diff)
 			}

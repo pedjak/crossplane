@@ -85,7 +85,7 @@ func TestReconcile(t *testing.T) {
 	noOpConfigureComposite := func(ctx context.Context, cm resource.CompositeClaim, cp, desiredCp resource.Composite) error {
 		return nil
 	}
-	noOpConfigureClaim := func(ctx context.Context, cm, desiredCm resource.CompositeClaim, cp resource.Composite) error {
+	noOpConfigureClaim := func(ctx context.Context, cm, desiredCm resource.CompositeClaim, cp, desiredCp resource.Composite) error {
 		return nil
 	}
 	cases := map[string]struct {
@@ -452,7 +452,7 @@ func TestReconcile(t *testing.T) {
 						},
 					}),
 					withCompositeConfigurator(noOpConfigureComposite),
-					withClaimConfigurator(func(ctx context.Context, cm, desiredCm resource.CompositeClaim, cp resource.Composite) error {
+					withClaimConfigurator(func(ctx context.Context, cm, desiredCm resource.CompositeClaim, cp, desiredCp resource.Composite) error {
 						return errBoom
 					}),
 				},

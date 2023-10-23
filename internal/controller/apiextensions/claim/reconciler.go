@@ -89,21 +89,7 @@ func ControllerName(name string) string {
 // A ConfiguratorFn configures the supplied resource, typically either populating the
 // composite with fields from the claim, or claim with fields from composite.
 type compositeConfiguratorFn func(ctx context.Context, cm resource.CompositeClaim, cp, desiredCp resource.Composite) error
-type claimConfiguratorFn func(ctx context.Context, cm, desiredCm resource.CompositeClaim, cp resource.Composite) error
-
-// A Binder binds a composite resource claim to a composite resource.
-type Binder interface {
-	// Bind the supplied Claim to the supplied Composite resource.
-	Bind(ctx context.Context, cm resource.CompositeClaim, cp resource.Composite) error
-}
-
-// A BinderFn binds a composite resource claim to a composite resource.
-type BinderFn func(ctx context.Context, cm resource.CompositeClaim, cp resource.Composite) error
-
-// Bind the supplied Claim to the supplied Composite resource.
-func (fn BinderFn) Bind(ctx context.Context, cm resource.CompositeClaim, cp resource.Composite) error {
-	return fn(ctx, cm, cp)
-}
+type claimConfiguratorFn func(ctx context.Context, cm, desiredCm resource.CompositeClaim, cp, desiredCp resource.Composite) error
 
 // A ConnectionPropagator is responsible for propagating information required to
 // connect to a resource.
@@ -521,10 +507,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	//	cm.SetConditions(xpv1.ReconcileError(err))
 	//	return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm, r.fieldOwner), errUpdateClaimStatus)
 	//}
-	if !meta.WasCreated(cp) {
-		cp.SetName(desiredCp.GetName())
-	}
-	if err := r.claim.Configure(ctx, cm, desiredCm, cp); err != nil {
+	if err := r.claim.Configure(ctx, cm, desiredCm, cp, desiredCp); err != nil {
 		log.Debug(errConfigureClaim, "error", err)
 		if kerrors.IsConflict(err) {
 			return reconcile.Result{Requeue: true}, nil
