@@ -25,6 +25,10 @@ spec:
           properties:
             coolField:
               type: string
+            numbers:
+              type: array
+              items:
+                type: string
             parameters:
               type: object
               properties:
@@ -37,3 +41,8 @@ spec:
                       type: string
           required:
           - coolField
+        status:
+          type: object
+          properties:
+            coolerField:
+              type: string

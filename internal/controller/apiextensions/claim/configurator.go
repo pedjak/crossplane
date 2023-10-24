@@ -236,7 +236,9 @@ func configureClaim(_ context.Context, cm resource.CompositeClaim, desiredCm res
 		if !ok {
 			return errors.Wrap(errors.New(errUnsupportedSrcObject), errMergeClaimStatus)
 		}
-		udesiredCm.Object["status"] = filter(fs)
+		udesiredCm.Object["status"] = keep(fs, "conditions")
+	} else {
+		udesiredCm.Object["status"] = map[string]any{}
 	}
 	if err := merge(udesiredCm.Object["status"], ucp.Object["status"],
 		// Status fields from composite overwrite non-empty fields in claim
@@ -244,9 +246,6 @@ func configureClaim(_ context.Context, cm resource.CompositeClaim, desiredCm res
 		withSrcFilter(xcrd.GetPropFields(xcrd.CompositeResourceStatusProps())...)); err != nil {
 		return errors.Wrap(err, errMergeClaimStatus)
 	}
-	// if err := c.client.Status().Update(ctx, cm); err != nil {
-	//	return errors.Wrap(err, errUpdateClaimStatus)
-	//}
 
 	// Propagate the actual external name back from the composite to the
 	// claim if it's set. The name we're propagating here will may be a name

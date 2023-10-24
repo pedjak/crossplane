@@ -429,12 +429,13 @@ func TestReconcile(t *testing.T) {
 						},
 					}),
 					withCompositeConfigurator(noOpConfigureComposite),
-					withClaimConfigurator(noOpConfigureClaim),
 				},
 				claim: withClaim(),
 			},
 			want: want{
 				claim: withClaim(func(o *claim.Unstructured) {
+					o.SetFinalizers([]string{finalizer})
+					o.SetResourceReference(&corev1.ObjectReference{})
 					o.SetConditions(xpv1.ReconcileError(errors.Wrap(errBoom, errPatchComposite)))
 				}),
 				r: reconcile.Result{Requeue: true},
@@ -488,7 +489,6 @@ func TestReconcile(t *testing.T) {
 						},
 					}),
 					withCompositeConfigurator(noOpConfigureComposite),
-					withClaimConfigurator(noOpConfigureClaim),
 				},
 				claim: withClaim(func(o *claim.Unstructured) {
 					o.SetResourceReference(&corev1.ObjectReference{})
@@ -496,6 +496,7 @@ func TestReconcile(t *testing.T) {
 			},
 			want: want{
 				claim: withClaim(func(o *claim.Unstructured) {
+					o.SetResourceReference(&corev1.ObjectReference{})
 					o.SetFinalizers([]string{finalizer})
 					o.SetConditions(xpv1.ReconcileSuccess(), Waiting())
 				}),
@@ -527,7 +528,6 @@ func TestReconcile(t *testing.T) {
 						},
 					}),
 					withCompositeConfigurator(noOpConfigureComposite),
-					withClaimConfigurator(noOpConfigureClaim),
 					WithConnectionPropagator(ConnectionPropagatorFn(func(ctx context.Context, to resource.LocalConnectionSecretOwner, from resource.ConnectionSecretOwner) (propagated bool, err error) {
 						return false, errBoom
 					})),
@@ -539,6 +539,7 @@ func TestReconcile(t *testing.T) {
 			want: want{
 				claim: withClaim(func(o *claim.Unstructured) {
 					o.SetFinalizers([]string{finalizer})
+					o.SetResourceReference(&corev1.ObjectReference{})
 					o.SetConditions(xpv1.ReconcileError(errors.Wrap(errBoom, errPropagateCDs)))
 				}),
 				r: reconcile.Result{Requeue: true},
@@ -568,12 +569,8 @@ func TestReconcile(t *testing.T) {
 
 							}),
 						},
-						//Applicator: resource.ApplyFn(func(c context.Context, r client.Object, ao ...resource.ApplyOption) error {
-						//	return nil
-						// }),
 					}),
 					withCompositeConfigurator(noOpConfigureComposite),
-					withClaimConfigurator(noOpConfigureClaim),
 					WithConnectionPropagator(ConnectionPropagatorFn(func(ctx context.Context, to resource.LocalConnectionSecretOwner, from resource.ConnectionSecretOwner) (propagated bool, err error) {
 						return true, nil
 					})),
@@ -584,6 +581,7 @@ func TestReconcile(t *testing.T) {
 			},
 			want: want{
 				claim: withClaim(func(o *claim.Unstructured) {
+					o.SetResourceReference(&corev1.ObjectReference{})
 					o.SetFinalizers([]string{finalizer})
 					o.SetConnectionDetailsLastPublishedTime(&now)
 					o.SetConditions(xpv1.ReconcileSuccess(), xpv1.Available())
@@ -652,7 +650,6 @@ func TestReconcile(t *testing.T) {
 						},
 					}),
 					withCompositeConfigurator(noOpConfigureComposite),
-					withClaimConfigurator(noOpConfigureClaim),
 					WithConnectionPropagator(ConnectionPropagatorFn(func(ctx context.Context, to resource.LocalConnectionSecretOwner, from resource.ConnectionSecretOwner) (propagated bool, err error) {
 						return true, nil
 					})),
@@ -665,6 +662,7 @@ func TestReconcile(t *testing.T) {
 			},
 			want: want{
 				claim: withClaim(func(o *claim.Unstructured) {
+					o.SetResourceReference(&corev1.ObjectReference{})
 					o.SetFinalizers([]string{finalizer})
 					o.SetConditions(xpv1.ReconcileSuccess(), xpv1.Available())
 					o.SetConnectionDetailsLastPublishedTime(&now)
@@ -694,7 +692,6 @@ func TestReconcile(t *testing.T) {
 						},
 					}),
 					withCompositeConfigurator(noOpConfigureComposite),
-					withClaimConfigurator(noOpConfigureClaim),
 					WithConnectionPropagator(ConnectionPropagatorFn(func(ctx context.Context, to resource.LocalConnectionSecretOwner, from resource.ConnectionSecretOwner) (propagated bool, err error) {
 						return true, nil
 					})),
@@ -708,6 +705,7 @@ func TestReconcile(t *testing.T) {
 			},
 			want: want{
 				claim: withClaim(func(o *claim.Unstructured) {
+					o.SetResourceReference(&corev1.ObjectReference{})
 					o.SetFinalizers([]string{finalizer})
 					o.SetConditions(xpv1.ReconcileSuccess(), xpv1.Available())
 					o.SetConnectionDetailsLastPublishedTime(&now)
@@ -942,6 +940,7 @@ func TestReconcile(t *testing.T) {
 
 					mockStatusUpdate := func(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 						if o, ok := obj.(*claim.Unstructured); ok {
+							fmt.Println(o.Object)
 							o.DeepCopyInto(&tc.args.claim.Unstructured)
 						}
 						if customStatusUpdate != nil {

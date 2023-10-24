@@ -17,6 +17,7 @@ limitations under the License.
 package e2e
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"sigs.k8s.io/e2e-framework/pkg/features"
 
 	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
+	"github.com/crossplane/crossplane-runtime/pkg/fieldpath"
 	"github.com/crossplane/crossplane-runtime/pkg/resource/unstructured/composed"
 	"github.com/crossplane/crossplane-runtime/pkg/resource/unstructured/composite"
 
@@ -196,8 +198,8 @@ func TestCompositionFunctions(t *testing.T) {
 	)
 }
 
-func TestRemoveLabelAndAnnotationOnClaimPropagateToXR(t *testing.T) {
-	manifests := "test/e2e/manifests/apiextensions/composition/removelabels"
+func TestPropagateFieldsRemovalToXR(t *testing.T) {
+	manifests := "test/e2e/manifests/apiextensions/composition/propagate-field-removals"
 	environment.Test(t,
 		features.New(t.Name()).
 			WithLabel(LabelArea, LabelAreaAPIExtensions).
@@ -214,18 +216,22 @@ func TestRemoveLabelAndAnnotationOnClaimPropagateToXR(t *testing.T) {
 				funcs.ResourcesHaveConditionWithin(5*time.Minute, manifests, "claim.yaml", xpv1.Available()),
 			)).
 			Assess("UpdateClaim", funcs.ApplyClaim(FieldManager, manifests, "claim-update.yaml")).
-			Assess("LabelsAndAnnotationRemovalPropagatedToXR", funcs.AllOf(
+			Assess("FieldsRemovalPropagatedToXR", funcs.AllOf(
 				funcs.CompositeResourceMustMatchWithin(1*time.Minute, manifests, "claim.yaml", func(xr *composite.Unstructured) bool {
 					labels := xr.GetLabels()
-					fooLabel, fooLabelExists := labels["foo"]
 					_, barLabelExists := labels["bar"]
 					annotations := xr.GetAnnotations()
-					fooAnnotation, fooAnnotationExists := annotations["test/foo"]
 					_, barAnnotationExists := annotations["test/bar"]
-					return fooLabelExists && fooLabel == "1" && !barLabelExists &&
-						fooAnnotationExists && fooAnnotation == "1" && !barAnnotationExists
+					p := fieldpath.Pave(xr.Object)
+					_, err := p.GetValue("spec.tags.newtag")
+					n, _ := p.GetStringArray("spec.numbers")
+					return labels["foo"] == "1" && !barLabelExists && labels["foo2"] == "3" &&
+						annotations["test/foo"] == "1" && !barAnnotationExists && annotations["test/foo2"] == "4" &&
+						reflect.DeepEqual(n, []string{"one", "five"}) &&
+						err != nil
 				}),
 				funcs.ClaimUnderTestMustNotChangeWithin(1*time.Minute),
+				funcs.ResourcesHaveFieldValueWithin(5*time.Minute, manifests, "claim-update.yaml", "status.coolerField", "I'm cool!"),
 			)).
 			WithTeardown("DeleteClaim", funcs.AllOf(
 				funcs.DeleteResources(manifests, "claim.yaml"),

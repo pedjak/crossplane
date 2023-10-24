@@ -571,7 +571,7 @@ func ClaimUnderTestMustNotChangeWithin(d time.Duration) features.Func {
 		list.Items = append(list.Items, ucm)
 
 		m := func(o k8s.Object) bool {
-			return o.GetResourceVersion() != cm.GetResourceVersion()
+			return o.GetGeneration() != cm.GetGeneration()
 		}
 		if err := wait.For(conditions.New(c.Client().Resources()).ResourcesMatch(list, m), wait.WithTimeout(d)); err != nil {
 			if deadlineExceed(err) {

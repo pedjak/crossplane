@@ -8,9 +8,16 @@ metadata:
     test/foo: "1"
     test/bar: "2"
   namespace: default
-  name: apiextensions-composition-remove-labels
+  name: propagate-fields-removals
 spec:
   coolField: "I'm cool!"
+  numbers:
+    - "one"
+    - "three"
+  parameters:
+    tags:
+      tag: "v1"
+      newtag: "v2"
   # This is necessary to ensure the claim's MRs are actually gone before we
   # delete the Provider - https://github.com/crossplane/crossplane/issues/4251
   compositeDeletePolicy: Foreground

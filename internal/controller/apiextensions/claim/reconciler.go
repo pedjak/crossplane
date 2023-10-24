@@ -449,17 +449,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 
 	meta.AddFinalizer(desiredCm, finalizer)
 
-	// if err := r.claim.AddFinalizer(ctx, cm); err != nil {
-	//	log.Debug(errAddFinalizer, "error", err)
-	//	if kerrors.IsConflict(err) {
-	//		return reconcile.Result{Requeue: true}, nil
-	//	}
-	//	err = errors.Wrap(err, errAddFinalizer)
-	//	record.Event(cm, event.Warning(reasonBind, err))
-	//	cm.SetConditions(xpv1.ReconcileError(err))
-	//	return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
-	//}
-
 	desiredCp := r.newComposite()
 	if err := r.composite.Configure(ctx, cm, cp, desiredCp); err != nil {
 		log.Debug(errConfigureComposite, "error", err)
@@ -517,12 +506,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		cm.SetConditions(xpv1.ReconcileError(err))
 		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm, r.fieldOwner), errUpdateClaimStatus)
 	}
+	claimStatus := desiredCm.(*claim.Unstructured).Object["status"]
+
 	log.Debug("PATCH CLAIM", "v", desiredCm.(*claim.Unstructured).Object)
 	err := r.client.Patch(ctx, desiredCm, client.Apply, r.patchOptions...)
 	if err != nil {
 		log.Debug("ERR", "err", err)
 		return reconcile.Result{}, err
 	}
+	desiredCm.(*claim.Unstructured).Object["status"] = claimStatus
 	log.Debug("ZZZ", "v", desiredCm.(*claim.Unstructured).Object)
 	if meta.WasCreated(cp) {
 		log.Debug("PATCH COMPOSITE", "v", desiredCp.(*composite.Unstructured).Object)
@@ -546,27 +538,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		}
 		err = errors.Wrap(err, errPatchComposite)
 		record.Event(cm, event.Warning(reasonCompositeConfigure, err))
-		cm.SetConditions(xpv1.ReconcileError(err))
-		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm, r.fieldOwner), errUpdateClaimStatus)
+		desiredCm.SetConditions(xpv1.ReconcileError(err))
+		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, desiredCm, r.fieldOwner), errUpdateClaimStatus)
 	default:
 		record.Event(cm, event.Normal(reasonCompositeConfigure, "Successfully applied composite resource"))
 		log.Debug("XXX", "v", desiredCp.(*composite.Unstructured).Object)
-		// if desiredCp.GetGeneration() == 1 {
-		//	mfs := desiredCp.GetManagedFields()
-		//	for i, _ := range mfs {
-		//		if mfs[i].Manager == string(r.fieldOwner) && mfs[i].Operation == "Update" {
-		//			log.Debug("QQQ")
-		//			mfs[i].Operation = "Apply"
-		//			break
-		//		}
-		//	}
-		//	desiredCp.SetManagedFields(mfs)
-		//	log.Debug("UPDATE MANAGED FIELDS", "v", desiredCp.(*composite.Unstructured).Object)
-		//	if err := r.client.Update(ctx, desiredCp); err != nil {
-		//		log.Debug("managedfields", "err", err)
-		//		return reconcile.Result{}, err
-		//	}
-		//}
 	}
 
 	desiredCm.SetConditions(xpv1.ReconcileSuccess())
@@ -589,6 +565,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		err = errors.Wrap(err, errPropagateCDs)
 		record.Event(cm, event.Warning(reasonPropagate, err))
 		desiredCm.SetConditions(xpv1.ReconcileError(err))
+		fmt.Println(desiredCm.(*claim.Unstructured).Object)
 		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, desiredCm, r.fieldOwner), errUpdateClaimStatus)
 	}
 	if propagated {

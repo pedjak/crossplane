@@ -3,12 +3,20 @@ kind: NopResource
 metadata:
   labels:
     foo: "1"
+    foo2: "3"
   annotations:
     test/foo: "1"
+    test/foo2: "4"
   namespace: default
-  name: apiextensions-composition-remove-labels
+  name: propagate-fields-removals
 spec:
   coolField: "I'm cool!"
-  # This is necessary to ensure the claim's MRs are actually gone before we
+  numbers:
+    - "one"
+    - "five"
+  parameters:
+    tags:
+      tag: "v1"
+    # This is necessary to ensure the claim's MRs are actually gone before we
   # delete the Provider - https://github.com/crossplane/crossplane/issues/4251
   compositeDeletePolicy: Foreground

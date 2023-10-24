@@ -15,8 +15,12 @@ spec:
       forProvider:
         conditionAfter:
         - conditionType: Ready
-          conditionStatus: "False"
-          time: 0s
-        - conditionType: Ready
           conditionStatus: "True"
-          time: 10s
+          time: 0s
+    patches:
+      - type: FromCompositeFieldPath
+        fromFieldPath: spec.coolField
+        toFieldPath: metadata.annotations["cf"]
+      - type: ToCompositeFieldPath
+        fromFieldPath: metadata.annotations["cf"]
+        toFieldPath: status.coolerField
