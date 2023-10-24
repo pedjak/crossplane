@@ -207,7 +207,6 @@ func TestCompositeConfigure(t *testing.T) {
 				cpname := patchCp.GetName()
 				cmname := args.cm.GetName()
 				prefix := fmt.Sprintf("%s-", cmname)
-				fmt.Println(cpname)
 				if !strings.HasPrefix(cpname, prefix) {
 					t.Errorf("composite name %s must be based on claim name %s", cpname, cmname)
 				}

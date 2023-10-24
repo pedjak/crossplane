@@ -33,10 +33,8 @@ import (
 
 // Error strings.
 const (
-	errUpdateClaim          = "cannot update composite resource claim"
 	errBindClaimConflict    = "cannot bind claim that references a different composite resource"
 	errGetSecret            = "cannot get composite resource's connection secret"
-	errGetXRD               = "cannot get composite resource definition"
 	errSecretConflict       = "cannot establish control of existing connection secret"
 	errCreateOrUpdateSecret = "cannot create or update connection secret"
 )

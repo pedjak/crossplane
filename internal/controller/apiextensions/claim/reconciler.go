@@ -56,9 +56,7 @@ const (
 	errDeleteUnbound              = "refusing to delete composite resource that is not bound to this claim"
 	errDeleteCDs                  = "cannot delete connection details"
 	errRemoveFinalizer            = "cannot remove composite resource claim finalizer"
-	errAddFinalizer               = "cannot add composite resource claim finalizer"
 	errConfigureComposite         = "cannot configure composite resource"
-	errBindComposite              = "cannot bind composite resource"
 	errPatchComposite             = "cannot patch composite resource"
 	errCreateComposite            = "cannot create composite resource"
 	errFixFieldOwnershipComposite = "cannot fix field ownerships on composite resource"
@@ -86,8 +84,6 @@ func ControllerName(name string) string {
 	return "claim/" + name
 }
 
-// A ConfiguratorFn configures the supplied resource, typically either populating the
-// composite with fields from the claim, or claim with fields from composite.
 type compositeConfiguratorFn func(ctx context.Context, cm resource.CompositeClaim, cp, desiredCp resource.Composite) error
 type claimConfiguratorFn func(ctx context.Context, cm, desiredCm resource.CompositeClaim, cp, desiredCp resource.Composite) error
 
@@ -434,24 +430,30 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return reconcile.Result{Requeue: false}, errors.Wrap(r.client.Status().Update(ctx, cm, r.fieldOwner), errUpdateClaimStatus)
 	}
 
+	// If composite exists, i.e. got created in the previous iteration,
+	// it might be needed to fix field ownerships,
+	// so that the claim controller becomes an exclusive owner
+	// of the fields mirrored from the claim to the composite
 	if meta.WasCreated(cp) && r.maybeFixFieldOwnership(cp) {
 		if err := r.client.Update(ctx, cp); err != nil {
 			if kerrors.IsConflict(err) {
 				return reconcile.Result{Requeue: true}, nil
 			}
 			record.Event(cp, event.Warning(reasonCompositeConfigure, err))
-			return reconcile.Result{Requeue: true}, errors.Wrap(err, errPatchComposite)
+			return reconcile.Result{Requeue: true}, errors.Wrap(err, errFixFieldOwnershipComposite)
 		}
 	}
-	desiredCm := r.newClaim()
-	desiredCm.SetName(cm.GetName())
-	desiredCm.SetNamespace(cm.GetNamespace())
 
-	meta.AddFinalizer(desiredCm, finalizer)
+	// create object that is going to hold the full claim patch eventually
+	cmPatch := r.newClaim()
+	cmPatch.SetName(cm.GetName())
+	cmPatch.SetNamespace(cm.GetNamespace())
 
-	desiredCp := r.newComposite()
-	if err := r.composite.Configure(ctx, cm, cp, desiredCp); err != nil {
-		log.Debug(errConfigureComposite, "error", err)
+	meta.AddFinalizer(cmPatch, finalizer)
+
+	// create object that is going to hold the full composite patch eventually
+	cpPatch := r.newComposite()
+	if err := r.composite.Configure(ctx, cm, cp, cpPatch); err != nil {
 		if kerrors.IsConflict(err) {
 			return reconcile.Result{Requeue: true}, nil
 		}
@@ -464,8 +466,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 			// 4. in the next reconcile loop we get the above conflict
 			// to unblock us, we need to remove the composite reference at the claim
 			// otherwise, we can move forward even if we requeue
-			// patchCm.SetResourceReference(nil)
-			_ = r.client.Patch(ctx, desiredCm, client.Apply, r.patchOptions...)
+			_ = r.client.Patch(ctx, cmPatch, client.Apply, r.patchOptions...)
 			return reconcile.Result{Requeue: true}, nil
 		}
 		err = errors.Wrap(err, errConfigureComposite)
@@ -476,27 +477,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 
 	// We'll know our composite resource's name at this point because it was
 	// set by the above configure step.
-	record = record.WithAnnotations("composite-name", cp.GetName())
-	log = log.WithValues("composite-name", cp.GetName())
+	record = record.WithAnnotations("composite-name", cpPatch.GetName())
+	log = log.WithValues("composite-name", cpPatch.GetName())
 
-	// We want to make sure we bind the claim to the composite (i.e. that we
-	// set the claim's resourceRef) before we ever create the composite. We
-	// use resourceRef to determine whether or not we need to create a new
-	// composite resource. If we first created the composite then set the
-	// resourceRef we'd risk leaking composite resources, e.g. if we hit an
-	// error between when we created the composite resource and when we
-	// persisted its resourceRef.
-	// if err := r.claim.Bind(ctx, desiredCm, desiredCp); err != nil {
-	//	log.Debug(errBindComposite, "error", err)
-	//	if kerrors.IsConflict(err) {
-	//		return reconcile.Result{Requeue: true}, nil
-	//	}
-	//	err = errors.Wrap(err, errBindComposite)
-	//	record.Event(cm, event.Warning(reasonBind, err))
-	//	cm.SetConditions(xpv1.ReconcileError(err))
-	//	return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm, r.fieldOwner), errUpdateClaimStatus)
-	//}
-	if err := r.claim.Configure(ctx, cm, desiredCm, cp, desiredCp); err != nil {
+	if err := r.claim.Configure(ctx, cm, cmPatch, cp, cpPatch); err != nil {
 		log.Debug(errConfigureClaim, "error", err)
 		if kerrors.IsConflict(err) {
 			return reconcile.Result{Requeue: true}, nil
@@ -506,23 +490,26 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		cm.SetConditions(xpv1.ReconcileError(err))
 		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm, r.fieldOwner), errUpdateClaimStatus)
 	}
-	claimStatus := desiredCm.(*claim.Unstructured).Object["status"]
 
-	log.Debug("PATCH CLAIM", "v", desiredCm.(*claim.Unstructured).Object)
-	err := r.client.Patch(ctx, desiredCm, client.Apply, r.patchOptions...)
+	// The following patch operation is going to override the status part of the claim patch
+	// with the status of the actual claim version.
+	// given that the status update come later, we need to preserve it temporarily.
+	desiredClaimStatus := cmPatch.(*claim.Unstructured).Object["status"]
+	err := r.client.Patch(ctx, cmPatch, client.Apply, r.patchOptions...)
 	if err != nil {
-		log.Debug("ERR", "err", err)
 		return reconcile.Result{}, err
 	}
-	desiredCm.(*claim.Unstructured).Object["status"] = claimStatus
-	log.Debug("ZZZ", "v", desiredCm.(*claim.Unstructured).Object)
+	// Restore the status calculated in this round
+	// and use cmPatch until the end of the reconciliation
+	// for setting claim conditions
+	cmPatch.(*claim.Unstructured).Object["status"] = desiredClaimStatus
+
 	if meta.WasCreated(cp) {
-		log.Debug("PATCH COMPOSITE", "v", desiredCp.(*composite.Unstructured).Object)
-		err = r.client.Patch(ctx, desiredCp, client.Apply, r.patchOptions...)
+		err = r.client.Patch(ctx, cpPatch, client.Apply, r.patchOptions...)
 	} else {
 		// if composite did not exist at the beginning of the loop, we want to create it
 		// so that we can check if the composite name is not already taken
-		err = r.client.Create(ctx, desiredCp, r.fieldOwner)
+		err = r.client.Create(ctx, cpPatch, r.fieldOwner)
 	}
 	switch {
 	case kerrors.IsAlreadyExists(err):
@@ -531,56 +518,63 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		log.Debug("Cannot create composite, another already exists with the generated name. Requeuing to try again with a new name.")
 		return reconcile.Result{Requeue: true}, nil
 	case resource.IsNotAllowed(err):
-		log.Debug("Skipped no-op composite resource apply")
+		log.Debug("Skipped no-op composite resource server-side apply")
 	case err != nil:
 		if kerrors.IsConflict(err) {
 			return reconcile.Result{Requeue: true}, nil
 		}
 		err = errors.Wrap(err, errPatchComposite)
 		record.Event(cm, event.Warning(reasonCompositeConfigure, err))
-		desiredCm.SetConditions(xpv1.ReconcileError(err))
-		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, desiredCm, r.fieldOwner), errUpdateClaimStatus)
+		cmPatch.SetConditions(xpv1.ReconcileError(err))
+		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cmPatch, r.fieldOwner), errUpdateClaimStatus)
 	default:
-		record.Event(cm, event.Normal(reasonCompositeConfigure, "Successfully applied composite resource"))
-		log.Debug("XXX", "v", desiredCp.(*composite.Unstructured).Object)
+		record.Event(cm, event.Normal(reasonCompositeConfigure, "Successfully patched composite resource"))
 	}
 
-	desiredCm.SetConditions(xpv1.ReconcileSuccess())
+	cmPatch.SetConditions(xpv1.ReconcileSuccess())
 
-	if !resource.IsConditionTrue(desiredCp.GetCondition(xpv1.TypeReady)) {
-		log.Debug("Composite resource is not yet ready")
+	if !resource.IsConditionTrue(cpPatch.GetCondition(xpv1.TypeReady)) {
 		record.Event(cm, event.Normal(reasonBind, "Composite resource is not yet ready"))
 
 		// We should be watching the composite resource and will have a
 		// request queued if it changes, so no need to requeue.
-		desiredCm.SetConditions(Waiting())
-		return reconcile.Result{}, errors.Wrap(r.client.Status().Update(ctx, desiredCm, r.fieldOwner), errUpdateClaimStatus)
+		cmPatch.SetConditions(Waiting())
+		return reconcile.Result{}, errors.Wrap(r.client.Status().Update(ctx, cmPatch, r.fieldOwner), errUpdateClaimStatus)
 	}
 
-	log.Debug("Successfully bound composite resource")
-	record.Event(desiredCm, event.Normal(reasonBind, "Successfully bound composite resource"))
+	record.Event(cmPatch, event.Normal(reasonBind, "Successfully bound composite resource"))
 
-	propagated, err := r.composite.PropagateConnection(ctx, desiredCm, desiredCp)
+	propagated, err := r.composite.PropagateConnection(ctx, cmPatch, cpPatch)
 	if err != nil {
 		err = errors.Wrap(err, errPropagateCDs)
 		record.Event(cm, event.Warning(reasonPropagate, err))
-		desiredCm.SetConditions(xpv1.ReconcileError(err))
-		fmt.Println(desiredCm.(*claim.Unstructured).Object)
-		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, desiredCm, r.fieldOwner), errUpdateClaimStatus)
+		cmPatch.SetConditions(xpv1.ReconcileError(err))
+		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cmPatch, r.fieldOwner), errUpdateClaimStatus)
 	}
 	if propagated {
-		desiredCm.SetConnectionDetailsLastPublishedTime(&metav1.Time{Time: time.Now()})
-		record.Event(desiredCm, event.Normal(reasonPropagate, "Successfully propagated connection details from composite resource"))
+		cmPatch.SetConnectionDetailsLastPublishedTime(&metav1.Time{Time: time.Now()})
+		record.Event(cmPatch, event.Normal(reasonPropagate, "Successfully propagated connection details from composite resource"))
 	}
 
 	// We have a watch on both the claim and its composite, so there's no
 	// need to requeue here.
-	desiredCm.SetConditions(xpv1.Available())
-	return reconcile.Result{Requeue: false}, errors.Wrap(r.client.Status().Update(ctx, desiredCm, r.fieldOwner), errUpdateClaimStatus)
+	cmPatch.SetConditions(xpv1.Available())
+	return reconcile.Result{Requeue: false}, errors.Wrap(r.client.Status().Update(ctx, cmPatch, r.fieldOwner), errUpdateClaimStatus)
 }
 
-func (r *Reconciler) maybeFixFieldOwnership(obj metav1.Object) bool {
-	// https://github.com/kubernetes/kubernetes/issues/99003
+// For the background, check https://github.com/kubernetes/kubernetes/issues/99003
+// Managed fields owner key is a combination of the manager name and the used operation
+// Initially, we create a composite using CREATE request, because that is the only
+// way to figure out if the generated name is already taken.
+// If the operation is successful, managed fields operation will be set to "Update".
+// Later patches are going to produce another managed fields set for the same manager,
+// but with a different operation "Apply".
+// Such configuration would prevent removal of claim fields on the composite, i.e.
+// it would only remove the ownership.
+// In order to fix that, we need to manually change operation to "Apply",
+// before the first composite patch is sent to k8s api server.
+// Returns true if the ownership was fixed.
+func (r *Reconciler) maybeFixFieldOwnership(obj resource.Composite) bool {
 	mfs := obj.GetManagedFields()
 	for i := range mfs {
 		if mfs[i].Manager == string(r.fieldOwner) && mfs[i].Operation == "Update" {

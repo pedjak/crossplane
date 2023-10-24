@@ -19,6 +19,7 @@ package claim
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -50,7 +51,7 @@ import (
 
 func TestReconcile(t *testing.T) {
 	errBoom := errors.New("boom")
-	testLog := logging.NewLogrLogger(zap.New(zap.UseDevMode(true)).WithName("testlog"))
+	testLog := logging.NewLogrLogger(zap.New(zap.UseDevMode(true), zap.WriteTo(io.Discard)).WithName("testlog"))
 	name := "coolclaim"
 
 	type args struct {
@@ -59,12 +60,12 @@ func TestReconcile(t *testing.T) {
 		with       resource.CompositeKind
 		opts       []ReconcilerOption
 		claim      *claim.Unstructured
-		patchClaim *claim.Unstructured
+		claimPatch *claim.Unstructured
 	}
 	type want struct {
 		r           reconcile.Result
 		claim       *claim.Unstructured
-		patchClaim  *claim.Unstructured
+		claimPatch  *claim.Unstructured
 		err         error
 		claimAssert func(args args, want want) error
 	}
@@ -82,10 +83,10 @@ func TestReconcile(t *testing.T) {
 
 	now := metav1.Now()
 
-	noOpConfigureComposite := func(ctx context.Context, cm resource.CompositeClaim, cp, desiredCp resource.Composite) error {
+	noOpConfigureComposite := func(ctx context.Context, cm resource.CompositeClaim, cp, cpPatch resource.Composite) error {
 		return nil
 	}
-	noOpConfigureClaim := func(ctx context.Context, cm, desiredCm resource.CompositeClaim, cp, desiredCp resource.Composite) error {
+	noOpConfigureClaim := func(ctx context.Context, cm, cmPatch resource.CompositeClaim, cp, cpPatch resource.Composite) error {
 		return nil
 	}
 	cases := map[string]struct {
@@ -392,7 +393,7 @@ func TestReconcile(t *testing.T) {
 			args: args{
 				mgr: &fake.Manager{},
 				opts: []ReconcilerOption{
-					withCompositeConfigurator(func(ctx context.Context, cm resource.CompositeClaim, cp, desiredCp resource.Composite) error {
+					withCompositeConfigurator(func(ctx context.Context, cm resource.CompositeClaim, cp, cpPatch resource.Composite) error {
 						return errBoom
 					}),
 				},
@@ -453,7 +454,7 @@ func TestReconcile(t *testing.T) {
 						},
 					}),
 					withCompositeConfigurator(noOpConfigureComposite),
-					withClaimConfigurator(func(ctx context.Context, cm, desiredCm resource.CompositeClaim, cp, desiredCp resource.Composite) error {
+					withClaimConfigurator(func(ctx context.Context, cm, cmPatch resource.CompositeClaim, cp, cpPatch resource.Composite) error {
 						return errBoom
 					}),
 				},
@@ -796,8 +797,7 @@ func TestReconcile(t *testing.T) {
 			},
 			want: want{
 				claimAssert: func(args args, want want) error {
-					fmt.Println(args.patchClaim.Object)
-					ref := args.patchClaim.GetResourceReference()
+					ref := args.claimPatch.GetResourceReference()
 					if ref.Namespace != "" || !strings.HasPrefix(ref.Name, "c-") ||
 						ref.Kind != "Composite" || ref.APIVersion != "foo.com/v1" {
 						return fmt.Errorf("Claim has no valid composite ref %v", ref)
@@ -829,7 +829,6 @@ func TestReconcile(t *testing.T) {
 								return nil
 							},
 							MockPatch: test.NewMockPatchFn(nil, func(obj client.Object) error {
-								fmt.Println(obj.(*claim.Unstructured).Object)
 								return nil
 							}),
 							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil),
@@ -856,7 +855,7 @@ func TestReconcile(t *testing.T) {
 			},
 			want: want{
 				r: reconcile.Result{Requeue: true},
-				patchClaim: withClaim(func(o *claim.Unstructured) {
+				claimPatch: withClaim(func(o *claim.Unstructured) {
 					o.SetFinalizers([]string{finalizer})
 					o.SetGroupVersionKind(schema.GroupVersionKind{Group: "foo.com", Version: "v1", Kind: "Claim"})
 					o.SetName("c")
@@ -940,7 +939,6 @@ func TestReconcile(t *testing.T) {
 
 					mockStatusUpdate := func(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 						if o, ok := obj.(*claim.Unstructured); ok {
-							fmt.Println(o.Object)
 							o.DeepCopyInto(&tc.args.claim.Unstructured)
 						}
 						if customStatusUpdate != nil {
@@ -961,7 +959,7 @@ func TestReconcile(t *testing.T) {
 
 					mockPatch := func(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 						if o, ok := obj.(*claim.Unstructured); ok {
-							tc.args.patchClaim = o
+							tc.args.claimPatch = o
 						}
 						if customPatch != nil {
 							return customPatch(ctx, obj, patch, opts...)
@@ -1004,8 +1002,8 @@ func TestReconcile(t *testing.T) {
 					t.Errorf("\n%s\nr.Reconcile(...): -want, +got:\n%s", tc.reason, diff)
 				}
 			}
-			if tc.want.patchClaim != nil {
-				if diff := cmp.Diff(tc.want.patchClaim, tc.args.patchClaim, cmpopts.AcyclicTransformer("StringToTime", func(s string) any {
+			if tc.want.claimPatch != nil {
+				if diff := cmp.Diff(tc.want.claimPatch, tc.args.claimPatch, cmpopts.AcyclicTransformer("StringToTime", func(s string) any {
 					ts, err := time.Parse(time.RFC3339, s)
 					if err != nil {
 						return s
